@@ -9,7 +9,7 @@ spring:
   datasource:
     url: jdbc:postgresql://localhost:5432/appdb
     username: postgres
-    password: QWer2345
+    password: 123456
     driver-class-name: org.postgresql.Driver
   jpa:
     hibernate:
@@ -41,7 +41,7 @@ spring:
       port: 6379
       database: 0
       timeout: 5000ms
-      password: qwER2345
+      password: 123456
 
 # 监控端点
 management:
