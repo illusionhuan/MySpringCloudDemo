@@ -1,0 +1,25 @@
+# 编译输出
+target/
+
+# IDE 文件
+.idea/
+*.iml
+.vscode/
+*.swp
+
+# 日志
+*.log
+
+# 环境变量
+.env
+
+# Maven wrapper
+.mvn/wrapper/maven-wrapper.jar
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 临时文件
+*.tmp
+*.bak

@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:spring.io)",
+      "WebFetch(domain:github.com)",
+      "Bash(mvn spring-boot:run *)",
+      "Bash(mvn clean *)",
+      "Bash(mvn test *)",
+      "Bash(docker info *)"
+    ]
+  }
+}
