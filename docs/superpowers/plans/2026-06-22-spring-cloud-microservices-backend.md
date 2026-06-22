@@ -1,0 +1,3130 @@
+# Spring Cloud 微服务后端实施计划
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** 将现有单体 Spring Boot 项目重构为 5 个微服务（Gateway、User、Content、Comment、Notification），集成 Nacos、OpenFeign、Kafka、Sentinel、JWT 鉴权。
+
+**Architecture:** Maven 多模块单仓库结构，Gateway 统一入口 + JWT 鉴权，服务间通过 OpenFeign（同步）和 Kafka（异步）通信，Sentinel 提供熔断降级。
+
+**Tech Stack:** JDK 21, Spring Boot 3.4.1, Spring Cloud 2024.0.0, Spring Cloud Alibaba 2023.0.1.0, MyBatis-Plus 3.5.9, PostgreSQL 16, Kafka 3.x, Redis 7.x, Nacos 2.3.x
+
+## Global Constraints
+
+- 遵循《阿里巴巴Java开发手册》编码规范
+- Service 层使用 `@Slf4j`，创建操作 `log.info`，查询操作 `log.debug`，异常 `log.error`
+- 所有类必须有类注释（说明、作者），所有公共方法必须有 JavaDoc
+- 返回布尔值使用基本类型 `boolean`，不用包装类型 `Boolean`
+- 禁止直接抛出 `RuntimeException`，使用自定义 `BusinessException`
+- 所有数据库 ID 使用 `@TableId(type = IdType.AUTO)` 自增策略
+- Git 提交信息使用中文，格式：`类型: 描述`
+
+---
+
+## 文件结构总览
+
+```
+MySpringCloudDemo/
+├── pom.xml                                          # Task 1: 父 POM
+├── common-module/                                   # Task 3: 公共模块
+│   ├── pom.xml
+│   └── src/main/java/com/example/common/
+│       ├── exception/BusinessException.java
+│       ├── exception/ResourceNotFoundException.java
+│       ├── exception/GlobalExceptionHandler.java
+│       ├── dto/ApiResponse.java
+│       └── auth/JwtUtil.java
+├── user-service/                                    # Task 2: 用户服务迁移
+│   ├── pom.xml
+│   ├── src/main/java/com/example/user/
+│   │   ├── UserServiceApplication.java
+│   │   ├── controller/AuthController.java
+│   │   ├── controller/UserController.java
+│   │   ├── service/UserService.java
+│   │   ├── entity/User.java
+│   │   ├── repository/UserMapper.java
+│   │   ├── dto/LoginRequest.java
+│   │   ├── dto/RegisterRequest.java
+│   │   └── dto/LoginResponse.java
+│   └── src/main/resources/
+│       ├── application.yml
+│       └── schema.sql
+├── content-service/                                 # Task 4: 内容服务
+│   ├── pom.xml
+│   ├── src/main/java/com/example/content/
+│   │   ├── ContentServiceApplication.java
+│   │   ├── controller/ContentController.java
+│   │   ├── service/ContentService.java
+│   │   ├── entity/Content.java
+│   │   ├── repository/ContentMapper.java
+│   │   ├── dto/ContentDTO.java
+│   │   ├── dto/UserDTO.java
+│   │   ├── feign/UserFeignClient.java
+│   │   └── feign/UserFeignFallbackFactory.java
+│   └── src/main/resources/
+│       ├── application.yml
+│       └── schema.sql
+├── gateway-service/                                 # Task 5: 网关服务
+│   ├── pom.xml
+│   ├── src/main/java/com/example/gateway/
+│   │   ├── GatewayApplication.java
+│   │   └── filter/JwtAuthFilter.java
+│   └── src/main/resources/
+│       └── application.yml
+├── comment-service/                                 # Task 6: 评论服务
+│   ├── pom.xml
+│   ├── src/main/java/com/example/comment/
+│   │   ├── CommentServiceApplication.java
+│   │   ├── controller/CommentController.java
+│   │   ├── service/CommentService.java
+│   │   ├── entity/Comment.java
+│   │   ├── repository/CommentMapper.java
+│   │   ├── dto/CommentDTO.java
+│   │   ├── dto/ContentDTO.java
+│   │   ├── feign/ContentFeignClient.java
+│   │   ├── feign/ContentFeignFallbackFactory.java
+│   │   └── event/CommentEventProducer.java
+│   └── src/main/resources/
+│       ├── application.yml
+│       └── schema.sql
+└── notification-service/                            # Task 7: 通知服务
+    ├── pom.xml
+    ├── src/main/java/com/example/notification/
+    │   ├── NotificationServiceApplication.java
+    │   ├── controller/NotificationController.java
+    │   ├── service/NotificationService.java
+    │   ├── entity/Notification.java
+    │   ├── repository/NotificationMapper.java
+    │   └── event/NotificationEventConsumer.java
+    └── src/main/resources/
+        ├── application.yml
+        └── schema.sql
+```
+
+---
+
+## Task 1: 搭建 Maven 多模块骨架
+
+**Files:**
+- Modify: `pom.xml`（改造为父 POM）
+- Create: `common-module/pom.xml`
+- Create: `user-service/pom.xml`
+- Create: `content-service/pom.xml`
+- Create: `gateway-service/pom.xml`
+- Create: `comment-service/pom.xml`
+- Create: `notification-service/pom.xml`
+
+**Interfaces:**
+- Produces: 统一依赖版本管理，各子模块可独立构建
+
+- [ ] **Step 1: 备份当前 pom.xml**
+
+```bash
+cp pom.xml pom.xml.bak
+```
+
+- [ ] **Step 2: 创建父 POM**
+
+将现有 `pom.xml` 改造为聚合父 POM，保留版本管理，移除业务依赖：
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.4.1</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>com.example</groupId>
+    <artifactId>my-spring-cloud-demo</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <packaging>pom</packaging>
+    <name>MySpringCloudDemo</name>
+    <description>Spring Cloud 微服务示例项目</description>
+
+    <modules>
+        <module>common-module</module>
+        <module>user-service</module>
+        <module>content-service</module>
+        <module>comment-service</module>
+        <module>notification-service</module>
+        <module>gateway-service</module>
+    </modules>
+
+    <properties>
+        <java.version>21</java.version>
+        <spring-cloud.version>2024.0.0</spring-cloud.version>
+        <spring-cloud-alibaba.version>2023.0.1.0</spring-cloud-alibaba.version>
+        <mybatis-plus.version>3.5.9</mybatis-plus.version>
+        <jjwt.version>0.12.6</jjwt.version>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <!-- Spring Cloud BOM -->
+            <dependency>
+                <groupId>org.springframework.cloud</groupId>
+                <artifactId>spring-cloud-dependencies</artifactId>
+                <version>${spring-cloud.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <!-- Spring Cloud Alibaba BOM -->
+            <dependency>
+                <groupId>com.alibaba.cloud</groupId>
+                <artifactId>spring-cloud-alibaba-dependencies</artifactId>
+                <version>${spring-cloud-alibaba.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <!-- MyBatis-Plus -->
+            <dependency>
+                <groupId>com.baomidou</groupId>
+                <artifactId>mybatis-plus-spring-boot3-starter</artifactId>
+                <version>${mybatis-plus.version}</version>
+            </dependency>
+            <!-- JWT -->
+            <dependency>
+                <groupId>io.jsonwebtoken</groupId>
+                <artifactId>jjwt-api</artifactId>
+                <version>${jjwt.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.jsonwebtoken</groupId>
+                <artifactId>jjwt-impl</artifactId>
+                <version>${jjwt.version}</version>
+                <scope>runtime</scope>
+            </dependency>
+            <dependency>
+                <groupId>io.jsonwebtoken</groupId>
+                <artifactId>jjwt-jackson</artifactId>
+                <version>${jjwt.version}</version>
+                <scope>runtime</scope>
+            </dependency>
+            <!-- 公共模块 -->
+            <dependency>
+                <groupId>com.example</groupId>
+                <artifactId>common-module</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <source>${java.version}</source>
+                    <target>${java.version}</target>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>
+```
+
+- [ ] **Step 3: 创建各子模块空 POM（仅骨架）**
+
+创建 `common-module/pom.xml`：
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>com.example</groupId>
+        <artifactId>my-spring-cloud-demo</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+    </parent>
+    <artifactId>common-module</artifactId>
+    <name>common-module</name>
+    <description>公共模块：异常处理、JWT 工具、DTO</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-api</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-impl</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-jackson</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <optional>true</optional>
+        </dependency>
+    </dependencies>
+</project>
+```
+
+创建 `user-service/pom.xml`：
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>com.example</groupId>
+        <artifactId>my-spring-cloud-demo</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+    </parent>
+    <artifactId>user-service</artifactId>
+    <name>user-service</name>
+    <description>用户服务：注册登录、JWT 签发、用户管理</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.example</groupId>
+            <artifactId>common-module</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.alibaba.cloud</groupId>
+            <artifactId>spring-cloud-starter-alibaba-nacos-discovery</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.alibaba.cloud</groupId>
+            <artifactId>spring-cloud-starter-alibaba-nacos-config</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-bootstrap</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.baomidou</groupId>
+            <artifactId>mybatis-plus-spring-boot3-starter</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <excludes>
+                        <exclude>
+                            <groupId>org.projectlombok</groupId>
+                            <artifactId>lombok</artifactId>
+                        </exclude>
+                    </excludes>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>
+```
+
+创建 `content-service/pom.xml`：
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>com.example</groupId>
+        <artifactId>my-spring-cloud-demo</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+    </parent>
+    <artifactId>content-service</artifactId>
+    <name>content-service</name>
+    <description>内容服务：帖子发布、查询、OpenFeign 调用</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.example</groupId>
+            <artifactId>common-module</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.alibaba.cloud</groupId>
+            <artifactId>spring-cloud-starter-alibaba-nacos-discovery</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.alibaba.cloud</groupId>
+            <artifactId>spring-cloud-starter-alibaba-nacos-config</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-bootstrap</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-openfeign</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-circuitbreaker-resilience4j</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.baomidou</groupId>
+            <artifactId>mybatis-plus-spring-boot3-starter</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <excludes>
+                        <exclude>
+                            <groupId>org.projectlombok</groupId>
+                            <artifactId>lombok</artifactId>
+                        </exclude>
+                    </excludes>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>
+```
+
+创建 `gateway-service/pom.xml`：
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>com.example</groupId>
+        <artifactId>my-spring-cloud-demo</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+    </parent>
+    <artifactId>gateway-service</artifactId>
+    <name>gateway-service</name>
+    <description>API 网关：路由、JWT 鉴权、限流</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.example</groupId>
+            <artifactId>common-module</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-gateway</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.alibaba.cloud</groupId>
+            <artifactId>spring-cloud-starter-alibaba-nacos-discovery</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.alibaba.cloud</groupId>
+            <artifactId>spring-cloud-starter-alibaba-nacos-config</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-bootstrap</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <optional>true</optional>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <excludes>
+                        <exclude>
+                            <groupId>org.projectlombok</groupId>
+                            <artifactId>lombok</artifactId>
+                        </exclude>
+                    </excludes>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>
+```
+
+创建 `comment-service/pom.xml`：
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>com.example</groupId>
+        <artifactId>my-spring-cloud-demo</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+    </parent>
+    <artifactId>comment-service</artifactId>
+    <name>comment-service</name>
+    <description>评论服务：评论增删改查、Kafka 事件发布</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.example</groupId>
+            <artifactId>common-module</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.alibaba.cloud</groupId>
+            <artifactId>spring-cloud-starter-alibaba-nacos-discovery</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.alibaba.cloud</groupId>
+            <artifactId>spring-cloud-starter-alibaba-nacos-config</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-bootstrap</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-openfeign</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-circuitbreaker-resilience4j</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.kafka</groupId>
+            <artifactId>spring-kafka</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.baomidou</groupId>
+            <artifactId>mybatis-plus-spring-boot3-starter</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <excludes>
+                        <exclude>
+                            <groupId>org.projectlombok</groupId>
+                            <artifactId>lombok</artifactId>
+                        </exclude>
+                    </excludes>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>
+```
+
+创建 `notification-service/pom.xml`：
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>com.example</groupId>
+        <artifactId>my-spring-cloud-demo</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+    </parent>
+    <artifactId>notification-service</artifactId>
+    <name>notification-service</name>
+    <description>通知服务：Kafka 消费者、通知管理</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.example</groupId>
+            <artifactId>common-module</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.alibaba.cloud</groupId>
+            <artifactId>spring-cloud-starter-alibaba-nacos-discovery</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.alibaba.cloud</groupId>
+            <artifactId>spring-cloud-starter-alibaba-nacos-config</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-bootstrap</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.kafka</groupId>
+            <artifactId>spring-kafka</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.baomidou</groupId>
+            <artifactId>mybatis-plus-spring-boot3-starter</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <excludes>
+                        <exclude>
+                            <groupId>org.projectlombok</groupId>
+                            <artifactId>lombok</artifactId>
+                        </exclude>
+                    </excludes>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>
+```
+
+- [ ] **Step 4: 创建各子模块目录结构**
+
+```bash
+# common-module
+mkdir -p common-module/src/main/java/com/example/common/{exception,dto,auth}
+mkdir -p common-module/src/test/java/com/example/common
+
+# user-service
+mkdir -p user-service/src/main/java/com/example/user/{controller,service,entity,repository,dto}
+mkdir -p user-service/src/main/resources
+mkdir -p user-service/src/test/java/com/example/user
+
+# content-service
+mkdir -p content-service/src/main/java/com/example/content/{controller,service,entity,repository,dto,feign}
+mkdir -p content-service/src/main/resources
+mkdir -p content-service/src/test/java/com/example/content
+
+# gateway-service
+mkdir -p gateway-service/src/main/java/com/example/gateway/filter
+mkdir -p gateway-service/src/main/resources
+mkdir -p gateway-service/src/test/java/com/example/gateway
+
+# comment-service
+mkdir -p comment-service/src/main/java/com/example/comment/{controller,service,entity,repository,dto,feign,event}
+mkdir -p comment-service/src/main/resources
+mkdir -p comment-service/src/test/java/com/example/comment
+
+# notification-service
+mkdir -p notification-service/src/main/java/com/example/notification/{controller,service,entity,repository,event}
+mkdir -p notification-service/src/main/resources
+mkdir -p notification-service/src/test/java/com/example/notification
+```
+
+- [ ] **Step 5: 验证多模块构建**
+
+```bash
+cd D:/Dev/workspace/MySpringCloudDemo
+mvn clean compile -N
+```
+
+Expected: BUILD SUCCESS（父 POM 编译通过，子模块仅有空目录）
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add pom.xml common-module/pom.xml user-service/pom.xml content-service/pom.xml \
+  gateway-service/pom.xml comment-service/pom.xml notification-service/pom.xml
+git commit -m "feat: 搭建 Maven 多模块骨架，创建 6 个子模块 POM"
+```
+
+---
+
+## Task 2: 实现 common-module（异常处理 + JWT 工具 + DTO）
+
+**Files:**
+- Create: `common-module/src/main/java/com/example/common/exception/BusinessException.java`
+- Create: `common-module/src/main/java/com/example/common/exception/ResourceNotFoundException.java`
+- Create: `common-module/src/main/java/com/example/common/exception/GlobalExceptionHandler.java`
+- Create: `common-module/src/main/java/com/example/common/dto/ApiResponse.java`
+- Create: `common-module/src/main/java/com/example/common/auth/JwtUtil.java`
+- Create: `common-module/src/test/java/com/example/common/auth/JwtUtilTest.java`
+
+**Interfaces:**
+- Produces: `BusinessException` — 所有业务异常的基类
+- Produces: `ResourceNotFoundException` — 资源未找到异常
+- Produces: `GlobalExceptionHandler` — 统一异常处理
+- Produces: `ApiResponse<T>` — 统一响应格式
+- Produces: `JwtUtil.generateToken(Long userId, String username)` → `String`
+- Produces: `JwtUtil.parseToken(String token)` → `Claims`
+- Produces: `JwtUtil.getUserIdFromToken(String token)` → `Long`
+- Produces: `JwtUtil.getUsernameFromToken(String token)` → `String`
+
+- [ ] **Step 1: 编写 JwtUtil 测试**
+
+```java
+package com.example.common.auth;
+
+import io.jsonwebtoken.Claims;
+import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.*;
+
+class JwtUtilTest {
+
+    @Test
+    void generateToken_and_parseToken_shouldWork() {
+        Long userId = 1L;
+        String username = "testuser";
+
+        String token = JwtUtil.generateToken(userId, username);
+        assertNotNull(token);
+        assertFalse(token.isEmpty());
+
+        Claims claims = JwtUtil.parseToken(token);
+        assertEquals(userId, claims.get("userId", Long.class));
+        assertEquals(username, claims.getSubject());
+    }
+
+    @Test
+    void getUserIdFromToken_shouldReturnUserId() {
+        String token = JwtUtil.generateToken(42L, "alice");
+        assertEquals(42L, JwtUtil.getUserIdFromToken(token));
+    }
+
+    @Test
+    void getUsernameFromToken_shouldReturnUsername() {
+        String token = JwtUtil.generateToken(1L, "bob");
+        assertEquals("bob", JwtUtil.getUsernameFromToken(token));
+    }
+
+    @Test
+    void parseToken_withInvalidToken_shouldThrow() {
+        assertThrows(Exception.class, () -> JwtUtil.parseToken("invalid.token.here"));
+    }
+}
+```
+
+- [ ] **Step 2: 运行测试确认失败**
+
+```bash
+cd D:/Dev/workspace/MySpringCloudDemo
+mvn test -pl common-module -Dtest=JwtUtilTest
+```
+
+Expected: FAIL — `JwtUtil` 类不存在
+
+- [ ] **Step 3: 实现 BusinessException**
+
+```java
+package com.example.common.exception;
+
+import lombok.Getter;
+
+/**
+ * 业务异常基类
+ *
+ * @author demo
+ */
+@Getter
+public class BusinessException extends RuntimeException {
+
+    private final String code;
+
+    public BusinessException(String code, String message) {
+        super(message);
+        this.code = code;
+    }
+
+    public BusinessException(String code, String message, Throwable cause) {
+        super(message, cause);
+        this.code = code;
+    }
+}
+```
+
+- [ ] **Step 4: 实现 ResourceNotFoundException**
+
+```java
+package com.example.common.exception;
+
+/**
+ * 资源未找到异常
+ *
+ * @author demo
+ */
+public class ResourceNotFoundException extends BusinessException {
+
+    public ResourceNotFoundException(String resource, String field, Object value) {
+        super("RESOURCE_NOT_FOUND",
+                String.format("%s not found with %s: %s", resource, field, value));
+    }
+}
+```
+
+- [ ] **Step 5: 实现 ApiResponse**
+
+```java
+package com.example.common.dto;
+
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+
+/**
+ * 统一响应格式
+ *
+ * @author demo
+ */
+@Data
+@Builder
+@NoArgsConstructor
+@AllArgsConstructor
+public class ApiResponse<T> {
+
+    private int code;
+    private String message;
+    private T data;
+
+    public static <T> ApiResponse<T> success(T data) {
+        return ApiResponse.<T>builder()
+                .code(200)
+                .message("success")
+                .data(data)
+                .build();
+    }
+
+    public static <T> ApiResponse<T> error(int code, String message) {
+        return ApiResponse.<T>builder()
+                .code(code)
+                .message(message)
+                .build();
+    }
+}
+```
+
+- [ ] **Step 6: 实现 GlobalExceptionHandler**
+
+```java
+package com.example.common.exception;
+
+import com.example.common.dto.ApiResponse;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.ResponseStatus;
+import org.springframework.web.bind.annotation.RestControllerAdvice;
+
+/**
+ * 全局异常处理器
+ *
+ * @author demo
+ */
+@Slf4j
+@RestControllerAdvice
+public class GlobalExceptionHandler {
+
+    @ExceptionHandler(ResourceNotFoundException.class)
+    @ResponseStatus(HttpStatus.NOT_FOUND)
+    public ApiResponse<Void> handleResourceNotFound(ResourceNotFoundException e) {
+        log.error("资源未找到: {}", e.getMessage());
+        return ApiResponse.error(404, e.getMessage());
+    }
+
+    @ExceptionHandler(BusinessException.class)
+    @ResponseStatus(HttpStatus.BAD_REQUEST)
+    public ApiResponse<Void> handleBusiness(BusinessException e) {
+        log.error("业务异常: {}", e.getMessage());
+        return ApiResponse.error(400, e.getMessage());
+    }
+
+    @ExceptionHandler(Exception.class)
+    @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
+    public ApiResponse<Void> handleUnknown(Exception e) {
+        log.error("未知异常", e);
+        return ApiResponse.error(500, "服务器内部错误");
+    }
+}
+```
+
+- [ ] **Step 7: 实现 JwtUtil**
+
+```java
+package com.example.common.auth;
+
+import io.jsonwebtoken.Claims;
+import io.jsonwebtoken.Jwts;
+import io.jsonwebtoken.security.Keys;
+import javax.crypto.SecretKey;
+import java.nio.charset.StandardCharsets;
+import java.util.Date;
+
+/**
+ * JWT 工具类：签发、解析、校验 Token
+ *
+ * @author demo
+ */
+public class JwtUtil {
+
+    /** 密钥（生产环境应从配置中心读取） */
+    private static final String SECRET = "MySpringCloudDemo-JWT-Secret-Key-2024-Long-Enough-For-HS256";
+    private static final long EXPIRATION_MS = 24 * 60 * 60 * 1000L; // 24 小时
+
+    private static SecretKey getSigningKey() {
+        return Keys.hmacShaKeyFor(SECRET.getBytes(StandardCharsets.UTF_8));
+    }
+
+    /**
+     * 签发 Token
+     *
+     * @param userId   用户 ID
+     * @param username 用户名
+     * @return JWT Token 字符串
+     */
+    public static String generateToken(Long userId, String username) {
+        return Jwts.builder()
+                .subject(username)
+                .claim("userId", userId)
+                .issuedAt(new Date())
+                .expiration(new Date(System.currentTimeMillis() + EXPIRATION_MS))
+                .signWith(getSigningKey())
+                .compact();
+    }
+
+    /**
+     * 解析 Token
+     *
+     * @param token JWT Token
+     * @return Claims 对象
+     */
+    public static Claims parseToken(String token) {
+        return Jwts.parser()
+                .verifyWith(getSigningKey())
+                .build()
+                .parseSignedClaims(token)
+                .getPayload();
+    }
+
+    /**
+     * 从 Token 中获取用户 ID
+     *
+     * @param token JWT Token
+     * @return 用户 ID
+     */
+    public static Long getUserIdFromToken(String token) {
+        return parseToken(token).get("userId", Long.class);
+    }
+
+    /**
+     * 从 Token 中获取用户名
+     *
+     * @param token JWT Token
+     * @return 用户名
+     */
+    public static String getUsernameFromToken(String token) {
+        return parseToken(token).getSubject();
+    }
+}
+```
+
+- [ ] **Step 8: 运行测试确认通过**
+
+```bash
+cd D:/Dev/workspace/MySpringCloudDemo
+mvn test -pl common-module -Dtest=JwtUtilTest
+```
+
+Expected: All 4 tests PASS
+
+- [ ] **Step 9: 安装 common-module 到本地仓库**
+
+```bash
+mvn install -pl common-module -DskipTests
+```
+
+Expected: BUILD SUCCESS — common-module 安装到 `~/.m2/repository`
+
+- [ ] **Step 10: 提交**
+
+```bash
+git add common-module/
+git commit -m "feat: 实现 common-module — 异常处理、JWT 工具、统一响应格式"
+```
+
+---
+
+## Task 3: 迁移 user-service（注册登录 + 用户 CRUD）
+
+**Files:**
+- Create: `user-service/src/main/java/com/example/user/UserServiceApplication.java`
+- Create: `user-service/src/main/java/com/example/user/entity/User.java`
+- Create: `user-service/src/main/java/com/example/user/repository/UserMapper.java`
+- Create: `user-service/src/main/java/com/example/user/dto/RegisterRequest.java`
+- Create: `user-service/src/main/java/com/example/user/dto/LoginRequest.java`
+- Create: `user-service/src/main/java/com/example/user/dto/LoginResponse.java`
+- Create: `user-service/src/main/java/com/example/user/service/UserService.java`
+- Create: `user-service/src/main/java/com/example/user/controller/AuthController.java`
+- Create: `user-service/src/main/java/com/example/user/controller/UserController.java`
+- Create: `user-service/src/main/resources/application.yml`
+- Create: `user-service/src/main/resources/bootstrap.yml`
+- Create: `user-service/src/main/resources/schema.sql`
+
+**Interfaces:**
+- Consumes: `JwtUtil.generateToken(userId, username)` from common-module
+- Consumes: `BusinessException`, `ResourceNotFoundException`, `GlobalExceptionHandler` from common-module
+- Produces: `POST /api/auth/register` — 注册
+- Produces: `POST /api/auth/login` — 登录，返回 JWT
+- Produces: `GET /api/users`, `GET /api/users/{id}`, `PUT /api/users/{id}`, `DELETE /api/users/{id}`
+
+- [ ] **Step 1: 创建 UserServiceApplication**
+
+```java
+package com.example.user;
+
+import org.mybatis.spring.annotation.MapperScan;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.cloud.client.discovery.EnableDiscoveryClient;
+
+/**
+ * 用户服务启动类
+ *
+ * @author demo
+ */
+@SpringBootApplication(scanBasePackages = {"com.example.user", "com.example.common"})
+@EnableDiscoveryClient
+@MapperScan("com.example.user.repository")
+public class UserServiceApplication {
+
+    public static void main(String[] args) {
+        SpringApplication.run(UserServiceApplication.class, args);
+    }
+}
+```
+
+- [ ] **Step 2: 创建 User 实体**
+
+```java
+package com.example.user.entity;
+
+import com.baomidou.mybatisplus.annotation.IdType;
+import com.baomidou.mybatisplus.annotation.TableId;
+import com.baomidou.mybatisplus.annotation.TableName;
+import lombok.*;
+
+/**
+ * 用户实体
+ *
+ * @author demo
+ */
+@TableName("users")
+@Getter
+@Setter
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class User {
+
+    @TableId(type = IdType.AUTO)
+    private Long id;
+
+    /** 登录用户名 */
+    private String username;
+
+    /** 密码（BCrypt 加密） */
+    private String password;
+
+    /** 显示名称 */
+    private String name;
+
+    /** 邮箱 */
+    private String email;
+
+    /** 手机号 */
+    private String phone;
+}
+```
+
+- [ ] **Step 3: 创建 UserMapper**
+
+```java
+package com.example.user.repository;
+
+import com.baomidou.mybatisplus.core.mapper.BaseMapper;
+import com.example.user.entity.User;
+
+/**
+ * 用户 Mapper
+ *
+ * @author demo
+ */
+public interface UserMapper extends BaseMapper<User> {
+}
+```
+
+- [ ] **Step 4: 创建 DTO**
+
+```java
+package com.example.user.dto;
+
+import lombok.Data;
+
+/**
+ * 注册请求
+ *
+ * @author demo
+ */
+@Data
+public class RegisterRequest {
+    private String username;
+    private String password;
+    private String email;
+}
+```
+
+```java
+package com.example.user.dto;
+
+import lombok.Data;
+
+/**
+ * 登录请求
+ *
+ * @author demo
+ */
+@Data
+public class LoginRequest {
+    private String username;
+    private String password;
+}
+```
+
+```java
+package com.example.user.dto;
+
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+
+/**
+ * 登录响应
+ *
+ * @author demo
+ */
+@Data
+@Builder
+@NoArgsConstructor
+@AllArgsConstructor
+public class LoginResponse {
+    private String token;
+    private Long userId;
+    private String username;
+    private String name;
+}
+```
+
+- [ ] **Step 5: 实现 UserService**
+
+```java
+package com.example.user.service;
+
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.example.common.auth.JwtUtil;
+import com.example.common.exception.BusinessException;
+import com.example.common.exception.ResourceNotFoundException;
+import com.example.user.dto.LoginRequest;
+import com.example.user.dto.LoginResponse;
+import com.example.user.dto.RegisterRequest;
+import com.example.user.entity.User;
+import com.example.user.repository.UserMapper;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.util.List;
+
+/**
+ * 用户业务逻辑层
+ *
+ * @author demo
+ */
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class UserService {
+
+    private final UserMapper userMapper;
+
+    /**
+     * 用户注册
+     *
+     * @param request 注册请求
+     * @return 创建的用户
+     */
+    @Transactional
+    public User register(RegisterRequest request) {
+        log.info("用户注册: {}", request.getUsername());
+
+        // 检查用户名是否已存在
+        User existing = userMapper.selectOne(
+                new LambdaQueryWrapper<User>().eq(User::getUsername, request.getUsername()));
+        if (existing != null) {
+            throw new BusinessException("USERNAME_EXISTS", "用户名已存在: " + request.getUsername());
+        }
+
+        User user = User.builder()
+                .username(request.getUsername())
+                .password(request.getPassword()) // TODO: BCrypt 加密
+                .name(request.getUsername())
+                .email(request.getEmail())
+                .build();
+        userMapper.insert(user);
+        log.info("用户注册成功, id: {}", user.getId());
+        return user;
+    }
+
+    /**
+     * 用户登录
+     *
+     * @param request 登录请求
+     * @return 登录响应（含 JWT Token）
+     */
+    public LoginResponse login(LoginRequest request) {
+        log.info("用户登录: {}", request.getUsername());
+
+        User user = userMapper.selectOne(
+                new LambdaQueryWrapper<User>().eq(User::getUsername, request.getUsername()));
+        if (user == null || !user.getPassword().equals(request.getPassword())) {
+            throw new BusinessException("INVALID_CREDENTIALS", "用户名或密码错误");
+        }
+
+        String token = JwtUtil.generateToken(user.getId(), user.getUsername());
+        return LoginResponse.builder()
+                .token(token)
+                .userId(user.getId())
+                .username(user.getUsername())
+                .name(user.getName())
+                .build();
+    }
+
+    /**
+     * 查询所有用户
+     *
+     * @return 用户列表
+     */
+    public List<User> findAll() {
+        log.debug("查询所有用户");
+        return userMapper.selectList(null);
+    }
+
+    /**
+     * 根据 ID 查询用户
+     *
+     * @param id 用户 ID
+     * @return 用户信息
+     */
+    public User findById(Long id) {
+        log.debug("根据 ID 查询用户: {}", id);
+        User user = userMapper.selectById(id);
+        if (user == null) {
+            throw new ResourceNotFoundException("User", "id", id);
+        }
+        return user;
+    }
+
+    /**
+     * 更新用户
+     *
+     * @param id      用户 ID
+     * @param updated 更新信息
+     * @return 更新后的用户
+     */
+    @Transactional
+    public User updateUser(Long id, User updated) {
+        log.info("更新用户: {}", id);
+        User user = findById(id);
+        user.setName(updated.getName());
+        user.setEmail(updated.getEmail());
+        user.setPhone(updated.getPhone());
+        userMapper.updateById(user);
+        return user;
+    }
+
+    /**
+     * 删除用户
+     *
+     * @param id 用户 ID
+     */
+    @Transactional
+    public void deleteUser(Long id) {
+        log.info("删除用户: {}", id);
+        findById(id);
+        userMapper.deleteById(id);
+    }
+}
+```
+
+- [ ] **Step 6: 实现 AuthController**
+
+```java
+package com.example.user.controller;
+
+import com.example.common.dto.ApiResponse;
+import com.example.user.dto.LoginRequest;
+import com.example.user.dto.LoginResponse;
+import com.example.user.dto.RegisterRequest;
+import com.example.user.entity.User;
+import com.example.user.service.UserService;
+import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.*;
+
+/**
+ * 认证控制器（注册、登录）
+ *
+ * @author demo
+ */
+@RestController
+@RequestMapping("/api/auth")
+@RequiredArgsConstructor
+public class AuthController {
+
+    private final UserService userService;
+
+    /**
+     * 用户注册
+     *
+     * @param request 注册请求
+     * @return 注册成功的用户
+     */
+    @PostMapping("/register")
+    @ResponseStatus(HttpStatus.CREATED)
+    public ApiResponse<User> register(@RequestBody RegisterRequest request) {
+        return ApiResponse.success(userService.register(request));
+    }
+
+    /**
+     * 用户登录
+     *
+     * @param request 登录请求
+     * @return 登录响应（含 JWT Token）
+     */
+    @PostMapping("/login")
+    public ApiResponse<LoginResponse> login(@RequestBody LoginRequest request) {
+        return ApiResponse.success(userService.login(request));
+    }
+}
+```
+
+- [ ] **Step 7: 实现 UserController**
+
+```java
+package com.example.user.controller;
+
+import com.example.common.dto.ApiResponse;
+import com.example.user.entity.User;
+import com.example.user.service.UserService;
+import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
+
+/**
+ * 用户管理控制器
+ *
+ * @author demo
+ */
+@RestController
+@RequestMapping("/api/users")
+@RequiredArgsConstructor
+public class UserController {
+
+    private final UserService userService;
+
+    @GetMapping
+    public ApiResponse<List<User>> list() {
+        return ApiResponse.success(userService.findAll());
+    }
+
+    @GetMapping("/{id}")
+    public ApiResponse<User> getById(@PathVariable Long id) {
+        return ApiResponse.success(userService.findById(id));
+    }
+
+    @PutMapping("/{id}")
+    public ApiResponse<User> update(@PathVariable Long id, @RequestBody User user) {
+        return ApiResponse.success(userService.updateUser(id, user));
+    }
+
+    @DeleteMapping("/{id}")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void delete(@PathVariable Long id) {
+        userService.deleteUser(id);
+    }
+}
+```
+
+- [ ] **Step 8: 创建 application.yml**
+
+```yaml
+server:
+  port: 8081
+
+spring:
+  application:
+    name: user-service
+  datasource:
+    url: jdbc:postgresql://localhost:5432/user_db
+    username: postgres
+    password: QWer2345
+    driver-class-name: org.postgresql.Driver
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:schema.sql
+
+mybatis-plus:
+  configuration:
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    db-config:
+      id-type: auto
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: always
+
+logging:
+  level:
+    com.example: DEBUG
+```
+
+- [ ] **Step 9: 创建 bootstrap.yml**
+
+```yaml
+spring:
+  cloud:
+    nacos:
+      server-addr: localhost:8848
+      namespace: public
+      group: DEFAULT_GROUP
+      username: nacos
+      password: nacos
+      config:
+        file-extension: yml
+      discovery:
+        group: DEFAULT_GROUP
+        ephemeral: true
+```
+
+- [ ] **Step 10: 创建 schema.sql**
+
+```sql
+CREATE TABLE IF NOT EXISTS users (
+    id BIGSERIAL PRIMARY KEY,
+    username VARCHAR(50) UNIQUE NOT NULL,
+    password VARCHAR(100) NOT NULL,
+    name VARCHAR(50),
+    email VARCHAR(100),
+    phone VARCHAR(20)
+);
+```
+
+- [ ] **Step 11: 验证编译**
+
+```bash
+cd D:/Dev/workspace/MySpringCloudDemo
+mvn clean compile -pl user-service
+```
+
+Expected: BUILD SUCCESS
+
+- [ ] **Step 12: 提交**
+
+```bash
+git add user-service/
+git commit -m "feat: 实现 user-service — 注册登录、JWT 签发、用户 CRUD"
+```
+
+---
+
+## Task 4: 实现 content-service（帖子管理 + OpenFeign）
+
+**Files:**
+- Create: `content-service/src/main/java/com/example/content/ContentServiceApplication.java`
+- Create: `content-service/src/main/java/com/example/content/entity/Content.java`
+- Create: `content-service/src/main/java/com/example/content/repository/ContentMapper.java`
+- Create: `content-service/src/main/java/com/example/content/dto/ContentDTO.java`
+- Create: `content-service/src/main/java/com/example/content/dto/UserDTO.java`
+- Create: `content-service/src/main/java/com/example/content/feign/UserFeignClient.java`
+- Create: `content-service/src/main/java/com/example/content/feign/UserFeignFallbackFactory.java`
+- Create: `content-service/src/main/java/com/example/content/service/ContentService.java`
+- Create: `content-service/src/main/java/com/example/content/controller/ContentController.java`
+- Create: `content-service/src/main/resources/application.yml`
+- Create: `content-service/src/main/resources/bootstrap.yml`
+- Create: `content-service/src/main/resources/schema.sql`
+
+**Interfaces:**
+- Consumes: `JwtUtil` from common-module
+- Consumes: user-service `GET /api/users/{id}` via OpenFeign
+- Produces: `POST /api/content`, `GET /api/content`, `GET /api/content/{id}`, `GET /api/content/user/{userId}`, `PUT /api/content/{id}`, `DELETE /api/content/{id}`
+
+- [ ] **Step 1: 创建 ContentServiceApplication**
+
+```java
+package com.example.content;
+
+import org.mybatis.spring.annotation.MapperScan;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.cloud.client.discovery.EnableDiscoveryClient;
+import org.springframework.cloud.openfeign.EnableFeignClients;
+
+/**
+ * 内容服务启动类
+ *
+ * @author demo
+ */
+@SpringBootApplication(scanBasePackages = {"com.example.content", "com.example.common"})
+@EnableDiscoveryClient
+@EnableFeignClients
+@MapperScan("com.example.content.repository")
+public class ContentServiceApplication {
+
+    public static void main(String[] args) {
+        SpringApplication.run(ContentServiceApplication.class, args);
+    }
+}
+```
+
+- [ ] **Step 2: 创建 Content 实体**
+
+```java
+package com.example.content.entity;
+
+import com.baomidou.mybatisplus.annotation.IdType;
+import com.baomidou.mybatisplus.annotation.TableId;
+import com.baomidou.mybatisplus.annotation.TableName;
+import lombok.*;
+import java.time.LocalDateTime;
+
+/**
+ * 帖子实体
+ *
+ * @author demo
+ */
+@TableName("contents")
+@Getter
+@Setter
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class Content {
+
+    @TableId(type = IdType.AUTO)
+    private Long id;
+
+    /** 作者 ID */
+    private Long userId;
+
+    /** 标题 */
+    private String title;
+
+    /** 正文 */
+    private String body;
+
+    /** 状态：DRAFT/PUBLISHED/DELETED */
+    @Builder.Default
+    private String status = "PUBLISHED";
+
+    private LocalDateTime createdAt;
+
+    private LocalDateTime updatedAt;
+}
+```
+
+- [ ] **Step 3: 创建 ContentMapper**
+
+```java
+package com.example.content.repository;
+
+import com.baomidou.mybatisplus.core.mapper.BaseMapper;
+import com.example.content.entity.Content;
+
+/**
+ * 帖子 Mapper
+ *
+ * @author demo
+ */
+public interface ContentMapper extends BaseMapper<Content> {
+}
+```
+
+- [ ] **Step 4: 创建 DTO**
+
+```java
+package com.example.content.dto;
+
+import lombok.Data;
+import java.time.LocalDateTime;
+
+/**
+ * 帖子传输对象
+ *
+ * @author demo
+ */
+@Data
+public class ContentDTO {
+    private Long id;
+    private Long userId;
+    private String authorName;
+    private String title;
+    private String body;
+    private String status;
+    private LocalDateTime createdAt;
+}
+```
+
+```java
+package com.example.content.dto;
+
+import lombok.Data;
+
+/**
+ * 用户信息（Feign 调用返回）
+ *
+ * @author demo
+ */
+@Data
+public class UserDTO {
+    private Long id;
+    private String username;
+    private String name;
+    private String email;
+}
+```
+
+- [ ] **Step 5: 创建 UserFeignClient**
+
+```java
+package com.example.content.feign;
+
+import com.example.common.dto.ApiResponse;
+import com.example.content.dto.UserDTO;
+import org.springframework.cloud.openfeign.FeignClient;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+
+/**
+ * User Service Feign 客户端
+ *
+ * @author demo
+ */
+@FeignClient(name = "user-service", fallbackFactory = UserFeignFallbackFactory.class)
+public interface UserFeignClient {
+
+    /**
+     * 根据 ID 获取用户信息
+     *
+     * @param id 用户 ID
+     * @return 用户信息
+     */
+    @GetMapping("/api/users/{id}")
+    ApiResponse<UserDTO> getUserById(@PathVariable("id") Long id);
+}
+```
+
+- [ ] **Step 6: 创建 UserFeignFallbackFactory**
+
+```java
+package com.example.content.feign;
+
+import com.example.common.dto.ApiResponse;
+import com.example.content.dto.UserDTO;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.cloud.openfeign.FallbackFactory;
+import org.springframework.stereotype.Component;
+
+/**
+ * UserFeign 降级工厂
+ *
+ * @author demo
+ */
+@Slf4j
+@Component
+public class UserFeignFallbackFactory implements FallbackFactory<UserFeignClient> {
+
+    @Override
+    public UserFeignClient create(Throwable cause) {
+        log.error("Feign 调用 user-service 失败", cause);
+        return new UserFeignClient() {
+            @Override
+            public ApiResponse<UserDTO> getUserById(Long id) {
+                UserDTO fallback = new UserDTO();
+                fallback.setId(id);
+                fallback.setName("未知用户");
+                return ApiResponse.success(fallback);
+            }
+        };
+    }
+}
+```
+
+- [ ] **Step 7: 实现 ContentService**
+
+```java
+package com.example.content.service;
+
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.example.common.exception.ResourceNotFoundException;
+import com.example.content.dto.ContentDTO;
+import com.example.content.dto.UserDTO;
+import com.example.content.entity.Content;
+import com.example.content.feign.UserFeignClient;
+import com.example.content.repository.ContentMapper;
+import com.example.common.dto.ApiResponse;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.time.LocalDateTime;
+import java.util.List;
+
+/**
+ * 帖子业务逻辑层
+ *
+ * @author demo
+ */
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class ContentService {
+
+    private final ContentMapper contentMapper;
+    private final UserFeignClient userFeignClient;
+
+    /**
+     * 发布帖子
+     *
+     * @param content 帖子信息
+     * @return 创建后的帖子 DTO
+     */
+    @Transactional
+    public ContentDTO createContent(Content content) {
+        log.info("发布帖子: {}", content.getTitle());
+
+        // Feign 调用验证用户存在
+        ApiResponse<UserDTO> userResp = userFeignClient.getUserById(content.getUserId());
+        String authorName = (userResp.getData() != null) ? userResp.getData().getName() : "未知用户";
+
+        content.setCreatedAt(LocalDateTime.now());
+        content.setUpdatedAt(LocalDateTime.now());
+        contentMapper.insert(content);
+
+        return toDTO(content, authorName);
+    }
+
+    /**
+     * 查询帖子列表
+     *
+     * @return 帖子 DTO 列表
+     */
+    public List<Content> findAll() {
+        log.debug("查询所有帖子");
+        return contentMapper.selectList(
+                new LambdaQueryWrapper<Content>()
+                        .eq(Content::getStatus, "PUBLISHED")
+                        .orderByDesc(Content::getCreatedAt));
+    }
+
+    /**
+     * 根据 ID 查询帖子
+     *
+     * @param id 帖子 ID
+     * @return 帖子信息
+     */
+    public Content findById(Long id) {
+        log.debug("查询帖子: {}", id);
+        Content content = contentMapper.selectById(id);
+        if (content == null) {
+            throw new ResourceNotFoundException("Content", "id", id);
+        }
+        return content;
+    }
+
+    /**
+     * 查询某用户的帖子
+     *
+     * @param userId 用户 ID
+     * @return 帖子列表
+     */
+    public List<Content> findByUserId(Long userId) {
+        log.debug("查询用户帖子: {}", userId);
+        return contentMapper.selectList(
+                new LambdaQueryWrapper<Content>()
+                        .eq(Content::getUserId, userId)
+                        .orderByDesc(Content::getCreatedAt));
+    }
+
+    /**
+     * 更新帖子
+     *
+     * @param id      帖子 ID
+     * @param updated 更新信息
+     * @return 更新后的帖子
+     */
+    @Transactional
+    public Content updateContent(Long id, Content updated) {
+        log.info("更新帖子: {}", id);
+        Content content = findById(id);
+        content.setTitle(updated.getTitle());
+        content.setBody(updated.getBody());
+        content.setUpdatedAt(LocalDateTime.now());
+        contentMapper.updateById(content);
+        return content;
+    }
+
+    /**
+     * 删除帖子（软删除）
+     *
+     * @param id 帖子 ID
+     */
+    @Transactional
+    public void deleteContent(Long id) {
+        log.info("删除帖子: {}", id);
+        Content content = findById(id);
+        content.setStatus("DELETED");
+        content.setUpdatedAt(LocalDateTime.now());
+        contentMapper.updateById(content);
+    }
+
+    private ContentDTO toDTO(Content content, String authorName) {
+        ContentDTO dto = new ContentDTO();
+        dto.setId(content.getId());
+        dto.setUserId(content.getUserId());
+        dto.setAuthorName(authorName);
+        dto.setTitle(content.getTitle());
+        dto.setBody(content.getBody());
+        dto.setStatus(content.getStatus());
+        dto.setCreatedAt(content.getCreatedAt());
+        return dto;
+    }
+}
+```
+
+- [ ] **Step 8: 实现 ContentController**
+
+```java
+package com.example.content.controller;
+
+import com.example.common.dto.ApiResponse;
+import com.example.content.dto.ContentDTO;
+import com.example.content.entity.Content;
+import com.example.content.service.ContentService;
+import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
+
+/**
+ * 帖子管理控制器
+ *
+ * @author demo
+ */
+@RestController
+@RequestMapping("/api/content")
+@RequiredArgsConstructor
+public class ContentController {
+
+    private final ContentService contentService;
+
+    @PostMapping
+    @ResponseStatus(HttpStatus.CREATED)
+    public ApiResponse<ContentDTO> create(@RequestBody Content content) {
+        return ApiResponse.success(contentService.createContent(content));
+    }
+
+    @GetMapping
+    public ApiResponse<List<Content>> list() {
+        return ApiResponse.success(contentService.findAll());
+    }
+
+    @GetMapping("/{id}")
+    public ApiResponse<Content> getById(@PathVariable Long id) {
+        return ApiResponse.success(contentService.findById(id));
+    }
+
+    @GetMapping("/user/{userId}")
+    public ApiResponse<List<Content>> getByUserId(@PathVariable Long userId) {
+        return ApiResponse.success(contentService.findByUserId(userId));
+    }
+
+    @PutMapping("/{id}")
+    public ApiResponse<Content> update(@PathVariable Long id, @RequestBody Content content) {
+        return ApiResponse.success(contentService.updateContent(id, content));
+    }
+
+    @DeleteMapping("/{id}")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void delete(@PathVariable Long id) {
+        contentService.deleteContent(id);
+    }
+}
+```
+
+- [ ] **Step 9: 创建配置文件**
+
+`application.yml`:
+```yaml
+server:
+  port: 8082
+
+spring:
+  application:
+    name: content-service
+  datasource:
+    url: jdbc:postgresql://localhost:5432/content_db
+    username: postgres
+    password: QWer2345
+    driver-class-name: org.postgresql.Driver
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:schema.sql
+
+mybatis-plus:
+  configuration:
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    db-config:
+      id-type: auto
+
+# Feign 配置
+spring.cloud.openfeign.circuitbreaker.enabled: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+logging:
+  level:
+    com.example: DEBUG
+```
+
+`bootstrap.yml`:
+```yaml
+spring:
+  cloud:
+    nacos:
+      server-addr: localhost:8848
+      namespace: public
+      group: DEFAULT_GROUP
+      username: nacos
+      password: nacos
+      config:
+        file-extension: yml
+      discovery:
+        group: DEFAULT_GROUP
+        ephemeral: true
+```
+
+`schema.sql`:
+```sql
+CREATE TABLE IF NOT EXISTS contents (
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    title VARCHAR(200) NOT NULL,
+    body TEXT,
+    status VARCHAR(20) DEFAULT 'PUBLISHED',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+- [ ] **Step 10: 验证编译**
+
+```bash
+cd D:/Dev/workspace/MySpringCloudDemo
+mvn clean compile -pl content-service
+```
+
+Expected: BUILD SUCCESS
+
+- [ ] **Step 11: 提交**
+
+```bash
+git add content-service/
+git commit -m "feat: 实现 content-service — 帖子管理、OpenFeign 调用 user-service"
+```
+
+---
+
+## Task 5: 实现 gateway-service（路由 + JWT 鉴权）
+
+**Files:**
+- Create: `gateway-service/src/main/java/com/example/gateway/GatewayApplication.java`
+- Create: `gateway-service/src/main/java/com/example/gateway/filter/JwtAuthFilter.java`
+- Create: `gateway-service/src/main/resources/application.yml`
+- Create: `gateway-service/src/main/resources/bootstrap.yml`
+
+**Interfaces:**
+- Consumes: `JwtUtil.parseToken()`, `JwtUtil.getUserIdFromToken()`, `JwtUtil.getUsernameFromToken()` from common-module
+- Routes: `/api/auth/**` → user-service (白名单), `/api/users/**` → user-service, `/api/content/**` → content-service, `/api/comments/**` → comment-service, `/api/notifications/**` → notification-service
+
+- [ ] **Step 1: 创建 GatewayApplication**
+
+```java
+package com.example.gateway;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.cloud.client.discovery.EnableDiscoveryClient;
+
+/**
+ * API 网关启动类
+ *
+ * @author demo
+ */
+@SpringBootApplication(scanBasePackages = {"com.example.gateway", "com.example.common"})
+@EnableDiscoveryClient
+public class GatewayApplication {
+
+    public static void main(String[] args) {
+        SpringApplication.run(GatewayApplication.class, args);
+    }
+}
+```
+
+- [ ] **Step 2: 实现 JwtAuthFilter**
+
+```java
+package com.example.gateway.filter;
+
+import com.example.common.auth.JwtUtil;
+import io.jsonwebtoken.Claims;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.cloud.gateway.filter.GatewayFilterChain;
+import org.springframework.cloud.gateway.filter.GlobalFilter;
+import org.springframework.core.Ordered;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.server.reactive.ServerHttpRequest;
+import org.springframework.http.server.reactive.ServerHttpResponse;
+import org.springframework.stereotype.Component;
+import org.springframework.web.server.ServerWebExchange;
+import reactor.core.publisher.Mono;
+
+import java.util.List;
+
+/**
+ * JWT 鉴权全局过滤器
+ *
+ * @author demo
+ */
+@Slf4j
+@Component
+public class JwtAuthFilter implements GlobalFilter, Ordered {
+
+    /** 白名单路径前缀 */
+    private static final List<String> WHITE_LIST = List.of(
+            "/api/auth/register",
+            "/api/auth/login"
+    );
+
+    @Override
+    public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
+        ServerHttpRequest request = exchange.getRequest();
+        String path = request.getURI().getPath();
+
+        // 白名单放行
+        if (isWhiteListed(path)) {
+            return chain.filter(exchange);
+        }
+
+        // 获取 Authorization 头
+        String authHeader = request.getHeaders().getFirst("Authorization");
+        if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+            log.warn("请求缺少 Token: {}", path);
+            return unauthorized(exchange);
+        }
+
+        // 解析 Token
+        try {
+            String token = authHeader.substring(7);
+            Claims claims = JwtUtil.parseToken(token);
+            Long userId = claims.get("userId", Long.class);
+            String username = claims.getSubject();
+
+            // 将用户信息写入请求头，转发给下游服务
+            ServerHttpRequest mutatedRequest = request.mutate()
+                    .header("X-User-Id", String.valueOf(userId))
+                    .header("X-Username", username)
+                    .build();
+
+            return chain.filter(exchange.mutate().request(mutatedRequest).build());
+        } catch (Exception e) {
+            log.error("Token 校验失败: {}", e.getMessage());
+            return unauthorized(exchange);
+        }
+    }
+
+    private boolean isWhiteListed(String path) {
+        return WHITE_LIST.stream().anyMatch(path::startsWith);
+    }
+
+    private Mono<Void> unauthorized(ServerWebExchange exchange) {
+        ServerHttpResponse response = exchange.getResponse();
+        response.setStatusCode(HttpStatus.UNAUTHORIZED);
+        return response.setComplete();
+    }
+
+    @Override
+    public int getOrder() {
+        return -100; // 高优先级
+    }
+}
+```
+
+- [ ] **Step 3: 创建 application.yml**
+
+```yaml
+server:
+  port: 8080
+
+spring:
+  application:
+    name: gateway-service
+  cloud:
+    gateway:
+      routes:
+        - id: user-service
+          uri: lb://user-service
+          predicates:
+            - Path=/api/auth/**,/api/users/**
+        - id: content-service
+          uri: lb://content-service
+          predicates:
+            - Path=/api/content/**
+        - id: comment-service
+          uri: lb://comment-service
+          predicates:
+            - Path=/api/comments/**
+        - id: notification-service
+          uri: lb://notification-service
+          predicates:
+            - Path=/api/notifications/**
+      discovery:
+        locator:
+          enabled: true
+          lower-case-service-id: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,gateway
+
+logging:
+  level:
+    com.example.gateway: DEBUG
+    org.springframework.cloud.gateway: DEBUG
+```
+
+- [ ] **Step 4: 创建 bootstrap.yml**
+
+```yaml
+spring:
+  cloud:
+    nacos:
+      server-addr: localhost:8848
+      namespace: public
+      group: DEFAULT_GROUP
+      username: nacos
+      password: nacos
+      config:
+        file-extension: yml
+      discovery:
+        group: DEFAULT_GROUP
+        ephemeral: true
+```
+
+- [ ] **Step 5: 验证编译**
+
+```bash
+cd D:/Dev/workspace/MySpringCloudDemo
+mvn clean compile -pl gateway-service
+```
+
+Expected: BUILD SUCCESS
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add gateway-service/
+git commit -m "feat: 实现 gateway-service — 路由转发、JWT 鉴权过滤器"
+```
+
+---
+
+## Task 6: 实现 comment-service（评论 + Kafka 事件发布）
+
+**Files:**
+- Create: `comment-service/src/main/java/com/example/comment/CommentServiceApplication.java`
+- Create: `comment-service/src/main/java/com/example/comment/entity/Comment.java`
+- Create: `comment-service/src/main/java/com/example/comment/repository/CommentMapper.java`
+- Create: `comment-service/src/main/java/com/example/comment/dto/CommentDTO.java`
+- Create: `comment-service/src/main/java/com/example/comment/dto/ContentDTO.java`
+- Create: `comment-service/src/main/java/com/example/comment/feign/ContentFeignClient.java`
+- Create: `comment-service/src/main/java/com/example/comment/feign/ContentFeignFallbackFactory.java`
+- Create: `comment-service/src/main/java/com/example/comment/event/CommentEventProducer.java`
+- Create: `comment-service/src/main/java/com/example/comment/service/CommentService.java`
+- Create: `comment-service/src/main/java/com/example/comment/controller/CommentController.java`
+- Create: `comment-service/src/main/resources/application.yml`
+- Create: `comment-service/src/main/resources/bootstrap.yml`
+- Create: `comment-service/src/main/resources/schema.sql`
+
+**Interfaces:**
+- Consumes: content-service `GET /api/content/{id}` via OpenFeign
+- Produces: `POST /api/comments`, `GET /api/comments/content/{contentId}`, `DELETE /api/comments/{id}`
+- Produces: Kafka Topic `comment-events` — 评论新增事件
+
+- [ ] **Step 1: 创建 CommentServiceApplication**
+
+```java
+package com.example.comment;
+
+import org.mybatis.spring.annotation.MapperScan;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.cloud.client.discovery.EnableDiscoveryClient;
+import org.springframework.cloud.openfeign.EnableFeignClients;
+
+/**
+ * 评论服务启动类
+ *
+ * @author demo
+ */
+@SpringBootApplication(scanBasePackages = {"com.example.comment", "com.example.common"})
+@EnableDiscoveryClient
+@EnableFeignClients
+@MapperScan("com.example.comment.repository")
+public class CommentServiceApplication {
+
+    public static void main(String[] args) {
+        SpringApplication.run(CommentServiceApplication.class, args);
+    }
+}
+```
+
+- [ ] **Step 2: 创建 Comment 实体**
+
+```java
+package com.example.comment.entity;
+
+import com.baomidou.mybatisplus.annotation.IdType;
+import com.baomidou.mybatisplus.annotation.TableId;
+import com.baomidou.mybatisplus.annotation.TableName;
+import lombok.*;
+import java.time.LocalDateTime;
+
+/**
+ * 评论实体
+ *
+ * @author demo
+ */
+@TableName("comments")
+@Getter
+@Setter
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class Comment {
+
+    @TableId(type = IdType.AUTO)
+    private Long id;
+
+    /** 帖子 ID */
+    private Long contentId;
+
+    /** 评论者 ID */
+    private Long userId;
+
+    /** 评论内容 */
+    private String body;
+
+    private LocalDateTime createdAt;
+}
+```
+
+- [ ] **Step 3: 创建 CommentMapper、DTO、FeignClient、FallbackFactory**
+
+```java
+package com.example.comment.repository;
+
+import com.baomidou.mybatisplus.core.mapper.BaseMapper;
+import com.example.comment.entity.Comment;
+
+public interface CommentMapper extends BaseMapper<Comment> {
+}
+```
+
+```java
+package com.example.comment.dto;
+
+import lombok.Data;
+import java.time.LocalDateTime;
+
+@Data
+public class CommentDTO {
+    private Long id;
+    private Long contentId;
+    private Long userId;
+    private String userName;
+    private String body;
+    private LocalDateTime createdAt;
+}
+```
+
+```java
+package com.example.comment.dto;
+
+import lombok.Data;
+
+@Data
+public class ContentDTO {
+    private Long id;
+    private Long userId;
+    private String title;
+    private String status;
+}
+```
+
+```java
+package com.example.comment.feign;
+
+import com.example.common.dto.ApiResponse;
+import com.example.comment.dto.ContentDTO;
+import org.springframework.cloud.openfeign.FeignClient;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+
+@FeignClient(name = "content-service", fallbackFactory = ContentFeignFallbackFactory.class)
+public interface ContentFeignClient {
+
+    @GetMapping("/api/content/{id}")
+    ApiResponse<ContentDTO> getContentById(@PathVariable("id") Long id);
+}
+```
+
+```java
+package com.example.comment.feign;
+
+import com.example.common.dto.ApiResponse;
+import com.example.comment.dto.ContentDTO;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.cloud.openfeign.FallbackFactory;
+import org.springframework.stereotype.Component;
+
+@Slf4j
+@Component
+public class ContentFeignFallbackFactory implements FallbackFactory<ContentFeignClient> {
+
+    @Override
+    public ContentFeignClient create(Throwable cause) {
+        log.error("Feign 调用 content-service 失败", cause);
+        return id -> {
+            ContentDTO fallback = new ContentDTO();
+            fallback.setId(id);
+            return ApiResponse.success(fallback);
+        };
+    }
+}
+```
+
+- [ ] **Step 4: 实现 CommentEventProducer**
+
+```java
+package com.example.comment.event;
+
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.stereotype.Component;
+
+/**
+ * 评论事件生产者
+ *
+ * @author demo
+ */
+@Slf4j
+@Component
+@RequiredArgsConstructor
+public class CommentEventProducer {
+
+    private final KafkaTemplate<String, String> kafkaTemplate;
+
+    private static final String TOPIC = "comment-events";
+
+    /**
+     * 发送评论新增事件
+     *
+     * @param commentId 评论 ID
+     * @param contentId 帖子 ID
+     * @param userId    评论者 ID
+     */
+    public void sendCommentAddedEvent(Long commentId, Long contentId, Long userId) {
+        String message = String.format("{\"eventType\":\"COMMENT_ADDED\",\"commentId\":%d,\"contentId\":%d,\"userId\":%d}",
+                commentId, contentId, userId);
+        log.info("发送评论事件: {}", message);
+        kafkaTemplate.send(TOPIC, String.valueOf(contentId), message);
+    }
+}
+```
+
+- [ ] **Step 5: 实现 CommentService**
+
+```java
+package com.example.comment.service;
+
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.example.common.dto.ApiResponse;
+import com.example.common.exception.ResourceNotFoundException;
+import com.example.comment.dto.ContentDTO;
+import com.example.comment.entity.Comment;
+import com.example.comment.event.CommentEventProducer;
+import com.example.comment.feign.ContentFeignClient;
+import com.example.comment.repository.CommentMapper;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.time.LocalDateTime;
+import java.util.List;
+
+/**
+ * 评论业务逻辑层
+ *
+ * @author demo
+ */
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class CommentService {
+
+    private final CommentMapper commentMapper;
+    private final ContentFeignClient contentFeignClient;
+    private final CommentEventProducer eventProducer;
+
+    /**
+     * 新增评论
+     *
+     * @param comment 评论信息
+     * @return 创建后的评论
+     */
+    @Transactional
+    public Comment createComment(Comment comment) {
+        log.info("新增评论, contentId: {}", comment.getContentId());
+
+        // Feign 调用验证帖子存在
+        ApiResponse<ContentDTO> resp = contentFeignClient.getContentById(comment.getContentId());
+        if (resp.getData() == null) {
+            throw new ResourceNotFoundException("Content", "id", comment.getContentId());
+        }
+
+        comment.setCreatedAt(LocalDateTime.now());
+        commentMapper.insert(comment);
+
+        // 发送 Kafka 事件
+        eventProducer.sendCommentAddedEvent(comment.getId(), comment.getContentId(), comment.getUserId());
+
+        return comment;
+    }
+
+    /**
+     * 查询某帖子的评论
+     *
+     * @param contentId 帖子 ID
+     * @return 评论列表
+     */
+    public List<Comment> findByContentId(Long contentId) {
+        log.debug("查询帖子评论: {}", contentId);
+        return commentMapper.selectList(
+                new LambdaQueryWrapper<Comment>()
+                        .eq(Comment::getContentId, contentId)
+                        .orderByAsc(Comment::getCreatedAt));
+    }
+
+    /**
+     * 删除评论
+     *
+     * @param id 评论 ID
+     */
+    @Transactional
+    public void deleteComment(Long id) {
+        log.info("删除评论: {}", id);
+        Comment comment = commentMapper.selectById(id);
+        if (comment == null) {
+            throw new ResourceNotFoundException("Comment", "id", id);
+        }
+        commentMapper.deleteById(id);
+    }
+}
+```
+
+- [ ] **Step 6: 实现 CommentController**
+
+```java
+package com.example.comment.controller;
+
+import com.example.common.dto.ApiResponse;
+import com.example.comment.entity.Comment;
+import com.example.comment.service.CommentService;
+import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
+
+/**
+ * 评论管理控制器
+ *
+ * @author demo
+ */
+@RestController
+@RequestMapping("/api/comments")
+@RequiredArgsConstructor
+public class CommentController {
+
+    private final CommentService commentService;
+
+    @PostMapping
+    @ResponseStatus(HttpStatus.CREATED)
+    public ApiResponse<Comment> create(@RequestBody Comment comment) {
+        return ApiResponse.success(commentService.createComment(comment));
+    }
+
+    @GetMapping("/content/{contentId}")
+    public ApiResponse<List<Comment>> getByContentId(@PathVariable Long contentId) {
+        return ApiResponse.success(commentService.findByContentId(contentId));
+    }
+
+    @DeleteMapping("/{id}")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void delete(@PathVariable Long id) {
+        commentService.deleteComment(id);
+    }
+}
+```
+
+- [ ] **Step 7: 创建配置文件**
+
+`application.yml`:
+```yaml
+server:
+  port: 8083
+
+spring:
+  application:
+    name: comment-service
+  datasource:
+    url: jdbc:postgresql://localhost:5432/comment_db
+    username: postgres
+    password: QWer2345
+    driver-class-name: org.postgresql.Driver
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:schema.sql
+  kafka:
+    bootstrap-servers: localhost:9092
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+
+mybatis-plus:
+  configuration:
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    db-config:
+      id-type: auto
+
+spring.cloud.openfeign.circuitbreaker.enabled: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+logging:
+  level:
+    com.example: DEBUG
+```
+
+`bootstrap.yml`:
+```yaml
+spring:
+  cloud:
+    nacos:
+      server-addr: localhost:8848
+      namespace: public
+      group: DEFAULT_GROUP
+      username: nacos
+      password: nacos
+      config:
+        file-extension: yml
+      discovery:
+        group: DEFAULT_GROUP
+        ephemeral: true
+```
+
+`schema.sql`:
+```sql
+CREATE TABLE IF NOT EXISTS comments (
+    id BIGSERIAL PRIMARY KEY,
+    content_id BIGINT NOT NULL,
+    user_id BIGINT NOT NULL,
+    body TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+- [ ] **Step 8: 验证编译并提交**
+
+```bash
+cd D:/Dev/workspace/MySpringCloudDemo
+mvn clean compile -pl comment-service
+```
+
+```bash
+git add comment-service/
+git commit -m "feat: 实现 comment-service — 评论 CRUD、OpenFeign 调用、Kafka 事件发布"
+```
+
+---
+
+## Task 7: 实现 notification-service（Kafka 消费者 + 通知管理）
+
+**Files:**
+- Create: `notification-service/src/main/java/com/example/notification/NotificationServiceApplication.java`
+- Create: `notification-service/src/main/java/com/example/notification/entity/Notification.java`
+- Create: `notification-service/src/main/java/com/example/notification/repository/NotificationMapper.java`
+- Create: `notification-service/src/main/java/com/example/notification/event/NotificationEventConsumer.java`
+- Create: `notification-service/src/main/java/com/example/notification/service/NotificationService.java`
+- Create: `notification-service/src/main/java/com/example/notification/controller/NotificationController.java`
+- Create: `notification-service/src/main/resources/application.yml`
+- Create: `notification-service/src/main/resources/bootstrap.yml`
+- Create: `notification-service/src/main/resources/schema.sql`
+
+**Interfaces:**
+- Consumes: Kafka Topic `comment-events` — 评论事件
+- Produces: `GET /api/notifications/user/{userId}`, `PUT /api/notifications/{id}/read`
+
+- [ ] **Step 1: 创建 NotificationServiceApplication**
+
+```java
+package com.example.notification;
+
+import org.mybatis.spring.annotation.MapperScan;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.cloud.client.discovery.EnableDiscoveryClient;
+
+/**
+ * 通知服务启动类
+ *
+ * @author demo
+ */
+@SpringBootApplication(scanBasePackages = {"com.example.notification", "com.example.common"})
+@EnableDiscoveryClient
+@MapperScan("com.example.notification.repository")
+public class NotificationServiceApplication {
+
+    public static void main(String[] args) {
+        SpringApplication.run(NotificationServiceApplication.class, args);
+    }
+}
+```
+
+- [ ] **Step 2: 创建 Notification 实体**
+
+```java
+package com.example.notification.entity;
+
+import com.baomidou.mybatisplus.annotation.IdType;
+import com.baomidou.mybatisplus.annotation.TableId;
+import com.baomidou.mybatisplus.annotation.TableName;
+import lombok.*;
+import java.time.LocalDateTime;
+
+/**
+ * 通知实体
+ *
+ * @author demo
+ */
+@TableName("notifications")
+@Getter
+@Setter
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class Notification {
+
+    @TableId(type = IdType.AUTO)
+    private Long id;
+
+    /** 接收通知的用户 ID */
+    private Long userId;
+
+    /** 通知类型 */
+    private String type;
+
+    /** 通知内容 */
+    private String message;
+
+    /** 是否已读 */
+    @Builder.Default
+    private boolean read = false;
+
+    private LocalDateTime createdAt;
+}
+```
+
+- [ ] **Step 3: 创建 NotificationMapper**
+
+```java
+package com.example.notification.repository;
+
+import com.baomidou.mybatisplus.core.mapper.BaseMapper;
+import com.example.notification.entity.Notification;
+
+public interface NotificationMapper extends BaseMapper<Notification> {
+}
+```
+
+- [ ] **Step 4: 实现 NotificationEventConsumer**
+
+```java
+package com.example.notification.event;
+
+import com.example.notification.entity.Notification;
+import com.example.notification.service.NotificationService;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.kafka.annotation.KafkaListener;
+import org.springframework.stereotype.Component;
+
+/**
+ * 通知事件消费者
+ *
+ * @author demo
+ */
+@Slf4j
+@Component
+@RequiredArgsConstructor
+public class NotificationEventConsumer {
+
+    private final NotificationService notificationService;
+
+    /**
+     * 消费评论事件
+     */
+    @KafkaListener(topics = "comment-events", groupId = "notification-group")
+    public void handleCommentEvent(String message) {
+        log.info("收到评论事件: {}", message);
+
+        // 简单解析 JSON（生产环境建议用 ObjectMapper）
+        try {
+            Long contentId = extractField(message, "contentId");
+            Long userId = extractField(message, "userId");
+
+            Notification notification = Notification.builder()
+                    .userId(userId)
+                    .type("COMMENT_ADDED")
+                    .message("您的帖子(ID:" + contentId + ") 收到了新评论")
+                    .build();
+            notificationService.createNotification(notification);
+        } catch (Exception e) {
+            log.error("处理评论事件失败", e);
+        }
+    }
+
+    private Long extractField(String json, String fieldName) {
+        String search = "\"" + fieldName + "\":";
+        int start = json.indexOf(search) + search.length();
+        int end = json.indexOf(",", start);
+        if (end == -1) end = json.indexOf("}", start);
+        return Long.parseLong(json.substring(start, end).trim());
+    }
+}
+```
+
+- [ ] **Step 5: 实现 NotificationService**
+
+```java
+package com.example.notification.service;
+
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.example.common.exception.ResourceNotFoundException;
+import com.example.notification.entity.Notification;
+import com.example.notification.repository.NotificationMapper;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.time.LocalDateTime;
+import java.util.List;
+
+/**
+ * 通知业务逻辑层
+ *
+ * @author demo
+ */
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class NotificationService {
+
+    private final NotificationMapper notificationMapper;
+
+    /**
+     * 创建通知
+     *
+     * @param notification 通知信息
+     */
+    @Transactional
+    public void createNotification(Notification notification) {
+        log.info("创建通知, userId: {}, type: {}", notification.getUserId(), notification.getType());
+        notification.setCreatedAt(LocalDateTime.now());
+        notificationMapper.insert(notification);
+    }
+
+    /**
+     * 查询用户的通知
+     *
+     * @param userId 用户 ID
+     * @return 通知列表
+     */
+    public List<Notification> findByUserId(Long userId) {
+        log.debug("查询用户通知: {}", userId);
+        return notificationMapper.selectList(
+                new LambdaQueryWrapper<Notification>()
+                        .eq(Notification::getUserId, userId)
+                        .orderByDesc(Notification::getCreatedAt));
+    }
+
+    /**
+     * 标记通知为已读
+     *
+     * @param id 通知 ID
+     */
+    @Transactional
+    public void markAsRead(Long id) {
+        log.info("标记通知已读: {}", id);
+        Notification notification = notificationMapper.selectById(id);
+        if (notification == null) {
+            throw new ResourceNotFoundException("Notification", "id", id);
+        }
+        notification.setRead(true);
+        notificationMapper.updateById(notification);
+    }
+}
+```
+
+- [ ] **Step 6: 实现 NotificationController**
+
+```java
+package com.example.notification.controller;
+
+import com.example.common.dto.ApiResponse;
+import com.example.notification.entity.Notification;
+import com.example.notification.service.NotificationService;
+import lombok.RequiredArgsConstructor;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
+
+/**
+ * 通知管理控制器
+ *
+ * @author demo
+ */
+@RestController
+@RequestMapping("/api/notifications")
+@RequiredArgsConstructor
+public class NotificationController {
+
+    private final NotificationService notificationService;
+
+    @GetMapping("/user/{userId}")
+    public ApiResponse<List<Notification>> getByUserId(@PathVariable Long userId) {
+        return ApiResponse.success(notificationService.findByUserId(userId));
+    }
+
+    @PutMapping("/{id}/read")
+    public ApiResponse<Void> markAsRead(@PathVariable Long id) {
+        notificationService.markAsRead(id);
+        return ApiResponse.success(null);
+    }
+}
+```
+
+- [ ] **Step 7: 创建配置文件**
+
+`application.yml`:
+```yaml
+server:
+  port: 8084
+
+spring:
+  application:
+    name: notification-service
+  datasource:
+    url: jdbc:postgresql://localhost:5432/notification_db
+    username: postgres
+    password: QWer2345
+    driver-class-name: org.postgresql.Driver
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:schema.sql
+  kafka:
+    bootstrap-servers: localhost:9092
+    consumer:
+      group-id: notification-group
+      auto-offset-reset: earliest
+
+mybatis-plus:
+  configuration:
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    db-config:
+      id-type: auto
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+logging:
+  level:
+    com.example: DEBUG
+```
+
+`bootstrap.yml`:
+```yaml
+spring:
+  cloud:
+    nacos:
+      server-addr: localhost:8848
+      namespace: public
+      group: DEFAULT_GROUP
+      username: nacos
+      password: nacos
+      config:
+        file-extension: yml
+      discovery:
+        group: DEFAULT_GROUP
+        ephemeral: true
+```
+
+`schema.sql`:
+```sql
+CREATE TABLE IF NOT EXISTS notifications (
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    type VARCHAR(50) NOT NULL,
+    message TEXT NOT NULL,
+    read BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+- [ ] **Step 8: 验证编译并提交**
+
+```bash
+cd D:/Dev/workspace/MySpringCloudDemo
+mvn clean compile -pl notification-service
+```
+
+```bash
+git add notification-service/
+git commit -m "feat: 实现 notification-service — Kafka 消费者、通知管理"
+```
+
+---
+
+## Task 8: 全项目编译验证 + 清理旧代码
+
+**Files:**
+- Delete: `pom.xml.bak`（备份文件）
+- Clean: 移除旧的单体代码目录（如 `src/main/java/com/example/demo/` 等）
+
+- [ ] **Step 1: 全项目编译**
+
+```bash
+cd D:/Dev/workspace/MySpringCloudDemo
+mvn clean compile
+```
+
+Expected: 所有 6 个模块 BUILD SUCCESS
+
+- [ ] **Step 2: 安装所有模块到本地仓库**
+
+```bash
+mvn install -DskipTests
+```
+
+Expected: 所有模块安装成功
+
+- [ ] **Step 3: 清理旧的单体代码**
+
+旧的单体代码（`src/main/java/com/example/demo/`）已迁移到各微服务模块中，可以删除：
+
+```bash
+# 确认旧代码目录
+ls src/main/java/com/example/demo/
+
+# 删除旧代码（保留 src/test 作为参考）
+rm -rf src/main/java/com/example/demo/
+rm -rf src/main/resources/application.yml
+rm -rf src/main/resources/bootstrap.yml
+rm -rf src/main/resources/schema.sql
+
+# 删除备份
+rm -f pom.xml.bak
+```
+
+- [ ] **Step 4: 更新 CLAUDE.md**
+
+更新项目结构说明，反映新的多模块架构。
+
+- [ ] **Step 5: 最终验证**
+
+```bash
+mvn clean compile
+```
+
+Expected: BUILD SUCCESS（不包含旧的单体模块）
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add -A
+git commit -m "refactor: 清理旧单体代码，完成微服务架构迁移"
+```
