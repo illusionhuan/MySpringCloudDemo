@@ -15,7 +15,7 @@
     <artifactId>my-spring-cloud-demo</artifactId>
     <version>1.0.0-SNAPSHOT</version>
     <packaging>pom</packaging>
-    <name>MySpringCloudDemo</name>
+    <name>my-spring-cloud-demo</name>
     <description>Spring Cloud 微服务示例项目</description>
 
     <modules>
