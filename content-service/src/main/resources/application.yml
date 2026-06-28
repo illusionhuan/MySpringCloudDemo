@@ -1,9 +1,9 @@
 server:
-  port: 8081
+  port: 8082
 
 spring:
   application:
-    name: user-service
+    name: content-service
   datasource:
     url: jdbc:postgresql://localhost:5432/appdb
     username: postgres
@@ -13,21 +13,26 @@ spring:
     init:
       mode: always
       schema-locations: classpath:schema.sql
+  kafka:
+    bootstrap-servers: localhost:9092
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
 
 mybatis-plus:
   global-config:
     db-config:
       id-type: auto
 
+# Feign 配置
+spring.cloud.openfeign.circuitbreaker.enabled: true
+
 management:
   endpoints:
     web:
       exposure:
         include: health,info
-  endpoint:
-    health:
-      show-details: always
 
 logging:
   level:
-    com.example: DEBUG
+    com.example: INFO

@@ -1,0 +1,13 @@
+2spring:
+  cloud:
+    nacos:
+      server-addr: localhost:8848
+      namespace: public
+      group: DEFAULT_GROUP
+      username: nacos
+      password: nacos
+      config:
+        file-extension: yml
+      discovery:
+        group: DEFAULT_GROUP
+        ephemeral: true
